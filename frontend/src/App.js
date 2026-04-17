@@ -882,7 +882,7 @@ const PapersList = ({ papers, selectedId, onSelect }) => {
       <div className="p-3 border-b border-black">
         <label className="text-xs tracking-widest uppercase font-bold">Papers</label>
       </div>
-      <div className="max-h-32 overflow-auto">
+      <div className="max-h-48 overflow-auto">
         {papers.length === 0 ? (
           <div className="p-3 text-center text-slate-500 text-xs">
             No papers yet
@@ -1063,50 +1063,73 @@ const Dashboard = () => {
 
       {/* Main content - dual pane */}
       <div className="dual-pane" style={{ height: "calc(100vh - 140px)" }}>
-        {/* Left pane - Upload & Papers */}
+        {/* Left pane - Papers & Questions */}
         <div className="border-r border-black flex flex-col overflow-hidden">
-          <PaperForm onPaperCreated={handlePaperCreated} />
-          <PapersList 
-            papers={papers} 
-            selectedId={selectedPaper?.id} 
-            onSelect={handlePaperSelect} 
-          />
-          
-          {selectedPaper && (
-            <div className="grid grid-cols-2 border-b border-black">
-              <PDFUploadZone 
-                paperId={selectedPaper.id} 
-                onUploadComplete={handleUploadComplete}
-                type="paper"
+          {/* Collapsible paper form */}
+          {!selectedPaper ? (
+            <>
+              <PaperForm onPaperCreated={handlePaperCreated} />
+              <PapersList 
+                papers={papers} 
+                selectedId={selectedPaper?.id} 
+                onSelect={handlePaperSelect} 
               />
-              <PDFUploadZone 
-                paperId={selectedPaper.id} 
-                onUploadComplete={() => {
-                  toast.success("Mark scheme processing...");
-                  setTimeout(() => fetchQuestions(selectedPaper.id), 5000);
-                }}
-                type="markscheme"
-              />
-            </div>
+            </>
+          ) : (
+            <>
+              {/* Selected paper header */}
+              <div className="p-3 border-b border-black flex items-center justify-between bg-slate-50">
+                <div className="flex items-center gap-2">
+                  <span className="font-sans font-bold">{selectedPaper.board}</span>
+                  <span className="text-sm text-slate-500">{selectedPaper.exam_year} P{selectedPaper.paper_number} {selectedPaper.tier}</span>
+                  {selectedPaper.ge_code && (
+                    <span className="text-xs font-mono px-2 py-0.5 border-2 border-blue-800 bg-blue-50 text-blue-800 font-bold">{selectedPaper.ge_code}</span>
+                  )}
+                  <StatusTag status={selectedPaper.status} />
+                </div>
+                <button
+                  data-testid="back-to-papers-btn"
+                  onClick={() => { setSelectedPaper(null); setSelectedQuestion(null); setQuestions([]); }}
+                  className="text-xs px-2 py-1 border border-black hover:bg-black hover:text-white"
+                >
+                  All Papers
+                </button>
+              </div>
+              
+              {/* Upload zones - compact inline */}
+              <div className="grid grid-cols-2 border-b border-black">
+                <PDFUploadZone 
+                  paperId={selectedPaper.id} 
+                  onUploadComplete={handleUploadComplete}
+                  type="paper"
+                />
+                <PDFUploadZone 
+                  paperId={selectedPaper.id} 
+                  onUploadComplete={() => {
+                    toast.success("Mark scheme processing...");
+                    setTimeout(() => fetchQuestions(selectedPaper.id), 5000);
+                  }}
+                  type="markscheme"
+                />
+              </div>
+              
+              {extractionJobId && (
+                <ExtractionStatus 
+                  jobId={extractionJobId} 
+                  onComplete={handleExtractionComplete}
+                />
+              )}
+              
+              {/* Question list - takes all remaining space */}
+              <div className="flex-1 overflow-hidden">
+                <QuestionList
+                  questions={questions}
+                  selectedId={selectedQuestion?.id}
+                  onSelect={setSelectedQuestion}
+                />
+              </div>
+            </>
           )}
-          
-          {extractionJobId && (
-            <ExtractionStatus 
-              jobId={extractionJobId} 
-              onComplete={handleExtractionComplete}
-            />
-          )}
-          
-          {/* Question list */}
-          <div className="flex-1 overflow-hidden">
-            {selectedPaper && (
-              <QuestionList
-                questions={questions}
-                selectedId={selectedQuestion?.id}
-                onSelect={setSelectedQuestion}
-              />
-            )}
-          </div>
         </div>
 
         {/* Right pane - Question Detail */}
