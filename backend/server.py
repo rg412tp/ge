@@ -345,27 +345,23 @@ async def extract_questions_from_page(page_image_base64: str, page_number: int, 
     try:
         system_prompt = """You extract GCSE Maths exam questions from images. Return ONLY valid JSON.
 
-CRITICAL RULES FOR THE "text" FIELD:
-- Must be CLEAN readable English with NO LaTeX symbols
-- NO $$, NO \\(, NO \\quad, NO \\frac, NO backslashes
-- Write math as plain words: "1, 5, 9, 13" not "$$1 \\quad 5$$"
-- Write fractions as: "1/2" not "\\frac{1}{2}"  
-- Write powers as: "x^2" or "x squared"
-- Use newlines as actual newlines, not \\n
+TWO TEXT FIELDS PER QUESTION AND PART:
+1. "text" - CLEAN readable English. No LaTeX. Write: "1, 5, 9, 13" not "$$1 \\quad 5$$". Write "1/sqrt(7)" as "1 divided by root 7". Write "x squared + 2x" not "x^2 + 2x".
+2. "latex" - Same content but with LaTeX math wrapped in \\( and \\). Example: "Rationalise the denominator of \\( \\frac{1}{\\sqrt{7}} \\)."
 
 RULES FOR "has_diagram":
-- Set TRUE for ANY visual element: graphs, shapes, Venn diagrams, tables with borders, coordinate grids, geometric figures, bar charts, pie charts, number lines
-- If the question references "the diagram", "the graph", "the figure", "the table" - it HAS a diagram
-- When in doubt, set TRUE
+- TRUE for ANY visual: graphs, shapes, Venn diagrams, tables, grids, geometric figures, charts, number lines, pictorial elements
+- If question says "the diagram", "the graph", "the figure", "the table", "shown below" - set TRUE
 
 Return JSON:
 {
   "questions": [
     {
       "question_number": 1,
-      "text": "Here are the first four terms of an arithmetic sequence. 1, 5, 9, 13. Find an expression, in terms of n, for the nth term of this sequence.",
+      "text": "Clean readable text with no LaTeX symbols",
+      "latex": "Same text but math in \\( LaTeX \\) delimiters",
       "parts": [
-        {"part_label": "a", "text": "Clean readable part text", "marks": 2}
+        {"part_label": "a", "text": "Clean part text", "latex": "Part with \\( math \\)", "marks": 2}
       ],
       "marks": 5,
       "has_diagram": true,
@@ -381,7 +377,7 @@ Return JSON:
 Difficulty: bronze (easy), silver (standard), gold (hard).
 Blank/cover page: {"questions": [], "page_has_content": false, "confidence": 1.0}"""
 
-        user_prompt = f"Extract questions from page {page_number}. The text field must be CLEAN English - no LaTeX symbols. Return JSON only."
+        user_prompt = f"Extract questions from page {page_number}. Provide both clean text AND latex fields. Return JSON only."
         
         response_text = await _call_gemini_vision(system_prompt, user_prompt, page_image_base64)
         await log_api_call(paper_id, "question_extraction")
