@@ -33,7 +33,7 @@ db = client[os.environ.get('DB_NAME', 'ge_question_bank')]
 
 # Gemini API Key (used for ALL AI extraction)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # Local file storage
 UPLOAD_DIR = ROOT_DIR / "uploads"
@@ -707,7 +707,7 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                                 page_base64, page_num, paper_id, q_number
                             )
                             
-                            # Crop and save diagrams
+                            # Crop and save diagrams - no refinement pass (padding handles it)
                             image_ids = []
                             if diagram_result.get("diagrams"):
                                 for diag in diagram_result["diagrams"]:
@@ -715,29 +715,6 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                                         cropped_img = crop_image_from_page(
                                             pdf_document, page_num, diag["bounding_box"]
                                         )
-                                        
-                                        # Two-pass refinement: check if crop needs tightening
-                                        cropped_base64 = base64.b64encode(cropped_img).decode('utf-8')
-                                        refine_result = await refine_crop_with_ai(cropped_base64, paper_id, q_number)
-                                        
-                                        if refine_result.get("needs_recrop") and refine_result.get("tighter_box"):
-                                            logger.info(f"Refining crop for Q{q_number}: {refine_result.get('text_found', '')}")
-                                            # Re-crop the already cropped image with tighter bounds
-                                            from PIL import Image as PILImage
-                                            crop_img = PILImage.open(io.BytesIO(cropped_img))
-                                            tb = refine_result["tighter_box"]
-                                            cx = int(tb['x_percent'] / 100 * crop_img.width)
-                                            cy = int(tb['y_percent'] / 100 * crop_img.height)
-                                            cw = int(tb['width_percent'] / 100 * crop_img.width)
-                                            ch = int(tb['height_percent'] / 100 * crop_img.height)
-                                            cx = max(0, cx)
-                                            cy = max(0, cy)
-                                            cw = min(crop_img.width - cx, cw)
-                                            ch = min(crop_img.height - cy, ch)
-                                            refined = crop_img.crop((cx, cy, cx + cw, cy + ch))
-                                            img_byte_arr = io.BytesIO()
-                                            refined.save(img_byte_arr, format='PNG', optimize=True)
-                                            cropped_img = img_byte_arr.getvalue()
                                         
                                         # Upload cropped image
                                         img_id = str(uuid.uuid4())
