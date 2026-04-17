@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: ge-backend
+    restart: always
+    env_file:
+      - ./backend/.env.production
+    ports:
+      - "8001:8001"
+    depends_on:
+      - mongo
+    volumes:
+      - upload_data:/app/uploads
+    networks:
+      - ge-network
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost}
+    container_name: ge-frontend
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+    networks:
+      - ge-network
+
+  mongo:
+    image: mongo:7
+    container_name: ge-mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-admin}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - ge-network
+
+volumes:
+  mongo_data:
+  upload_data:
+
+networks:
+  ge-network:
+    driver: bridge
