@@ -344,13 +344,13 @@ async def _call_gemini_vision(system_prompt: str, user_prompt: str, image_base64
     )
     return response.text
 
-# ============ Mathpix Extraction ============
+# ============ Mathpix Extraction (handles EVERYTHING) ============
 import requests as http_requests
 import re
 import time
 
 def mathpix_submit_pdf(pdf_content: bytes) -> str:
-    """Submit PDF to Mathpix, returns pdf_id"""
+    """Submit PDF to Mathpix - extracts text, LaTeX, tables, AND images in one call"""
     headers = {"app_id": MATHPIX_APP_ID, "app_key": MATHPIX_APP_KEY}
     resp = http_requests.post(
         "https://api.mathpix.com/v3/pdf",
@@ -361,8 +361,9 @@ def mathpix_submit_pdf(pdf_content: bytes) -> str:
                 "conversion_formats": {"md": True},
                 "math_inline_delimiters": ["\\(", "\\)"],
                 "math_display_delimiters": ["\\[", "\\]"],
-                "include_detected_alphabets": False,
                 "enable_tables_fallback": True,
+                "include_line_data": True,
+                "include_diagram_text": True,
             })
         },
         timeout=60
@@ -370,120 +371,149 @@ def mathpix_submit_pdf(pdf_content: bytes) -> str:
     resp.raise_for_status()
     return resp.json()["pdf_id"]
 
-def mathpix_wait_and_get(pdf_id: str, max_wait: int = 300) -> str:
-    """Wait for Mathpix processing and return markdown content"""
+def mathpix_poll_status(pdf_id: str, max_wait: int = 300) -> bool:
+    """Wait for Mathpix to finish processing"""
     headers = {"app_id": MATHPIX_APP_ID, "app_key": MATHPIX_APP_KEY}
-    
     for _ in range(max_wait // 3):
         resp = http_requests.get(f"https://api.mathpix.com/v3/pdf/{pdf_id}", headers=headers, timeout=30)
-        status = resp.json().get("status", "")
+        data = resp.json()
+        status = data.get("status", "")
         if status == "completed":
-            break
+            return True
         if status == "error":
-            raise Exception(f"Mathpix error: {resp.json()}")
+            raise Exception(f"Mathpix error: {data}")
         time.sleep(3)
-    
-    # Get markdown output
+    raise Exception("Mathpix timeout")
+
+def mathpix_get_mmd(pdf_id: str) -> str:
+    """Get Mathpix Markdown (text + LaTeX + image URLs + tables)"""
+    headers = {"app_id": MATHPIX_APP_ID, "app_key": MATHPIX_APP_KEY}
     resp = http_requests.get(f"https://api.mathpix.com/v3/pdf/{pdf_id}.mmd", headers=headers, timeout=60)
     resp.raise_for_status()
     return resp.text
 
-def parse_mathpix_to_questions(mmd_content: str) -> list:
-    """Parse Mathpix markdown into structured questions"""
+def mathpix_get_lines(pdf_id: str) -> dict:
+    """Get structured line data with diagram image URLs"""
+    headers = {"app_id": MATHPIX_APP_ID, "app_key": MATHPIX_APP_KEY}
+    resp = http_requests.get(f"https://api.mathpix.com/v3/pdf/{pdf_id}.lines.json", headers=headers, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+def download_image(url: str) -> bytes:
+    """Download image from Mathpix CDN"""
+    resp = http_requests.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.content
+
+def parse_mathpix_mmd(mmd_content: str) -> list:
+    """Parse Mathpix Markdown into structured questions with images"""
     questions = []
-    
-    # Split by question numbers: patterns like "1 ", "1.", "**1**", "1)" at start of line
-    # GCSE papers use patterns like: "1 " or "**1** " or "1." 
     lines = mmd_content.split('\n')
     
     current_q = None
     current_part = None
-    current_text_lines = []
+    current_text = []
+    current_images = []
     
-    # Regex for question number at start: "1 ", "1.", "**1**", etc.
+    # Question: "1 ", "**1**", "1.", "1)" at line start
     q_pattern = re.compile(r'^(?:\*\*)?(\d{1,2})(?:\*\*)?\s*[.)\s]')
-    # Part pattern: "(a)", "**(a)**", "a)", etc.
+    # Part: "(a)", "**(a)**"
     part_pattern = re.compile(r'^(?:\*\*)?\(([a-z])\)(?:\*\*)?\s*')
-    # Image pattern in Mathpix markdown
-    img_pattern = re.compile(r'!\[.*?\]\((.*?)\)')
+    # Image: ![...](url)
+    img_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+    # Marks: [2 marks], (2 marks), [2], (Total for Question ... marks)
+    marks_pattern = re.compile(r'\((\d+)\s*marks?\)', re.IGNORECASE)
     
-    def flush_current():
-        nonlocal current_q, current_part, current_text_lines
-        if current_q is not None:
-            text = '\n'.join(current_text_lines).strip()
+    def save_current():
+        nonlocal current_q, current_part, current_text, current_images
+        text = '\n'.join(current_text).strip()
+        if not text and not current_images:
+            current_text = []
+            current_images = []
+            return
+            
+        if current_q is not None and current_q > 0:
+            # Find or create question
+            existing = next((q for q in questions if q["question_number"] == current_q), None)
+            if not existing:
+                existing = {
+                    "question_number": current_q, "text": "", "latex": "",
+                    "parts": [], "has_diagram": False, "has_table": False,
+                    "marks": None, "image_urls": []
+                }
+                questions.append(existing)
+            
+            # Extract marks
+            m = marks_pattern.search(text)
+            marks = int(m.group(1)) if m else None
+            
             if current_part:
-                # Add to current part
-                if current_q < len(questions):
-                    questions[current_q - 1 if current_q > 0 else 0].setdefault("parts", [])
-                    questions[-1]["parts"].append({
-                        "part_label": current_part,
-                        "text": clean_text(text),
-                        "latex": text,
-                    })
-            elif text and current_q > 0:
-                # Check if question already exists
-                existing = next((q for q in questions if q["question_number"] == current_q), None)
-                if existing:
-                    existing["text"] = clean_text(text)
-                    existing["latex"] = text
-                else:
-                    questions.append({
-                        "question_number": current_q,
-                        "text": clean_text(text),
-                        "latex": text,
-                        "parts": [],
-                        "has_diagram": False,
-                        "has_table": False,
-                        "images_mmd": [],
-                    })
-        current_text_lines = []
+                existing["parts"].append({
+                    "part_label": current_part,
+                    "text": clean_text(text),
+                    "latex": text,
+                    "marks": marks,
+                    "image_urls": current_images.copy()
+                })
+            else:
+                existing["text"] = clean_text(text)
+                existing["latex"] = text
+                if marks:
+                    existing["marks"] = marks
+            
+            if current_images:
+                existing["has_diagram"] = True
+                existing["image_urls"].extend(current_images)
+            
+            if '|' in text and text.count('|') > 3:
+                existing["has_table"] = True
+        
+        current_text = []
+        current_images = []
     
     for line in lines:
+        # Check for images first
+        img_match = img_pattern.search(line)
+        if img_match:
+            current_images.append(img_match.group(2))
+            continue
+        
         # Check for question number
-        q_match = q_pattern.match(line.strip())
-        if q_match:
-            flush_current()
+        stripped = line.strip()
+        q_match = q_pattern.match(stripped)
+        if q_match and not stripped.startswith('('):
+            save_current()
             current_q = int(q_match.group(1))
             current_part = None
-            rest = line.strip()[q_match.end():].strip()
-            current_text_lines = [rest] if rest else []
+            rest = stripped[q_match.end():].strip()
+            current_text = [rest] if rest else []
             continue
         
-        # Check for part label
-        part_match = part_pattern.match(line.strip())
+        # Check for part
+        part_match = part_pattern.match(stripped)
         if part_match and current_q:
-            flush_current()
+            save_current()
             current_part = part_match.group(1)
-            rest = line.strip()[part_match.end():].strip()
-            current_text_lines = [rest] if rest else []
+            rest = stripped[part_match.end():].strip()
+            current_text = [rest] if rest else []
             continue
         
-        # Check for images
-        img_match = img_pattern.search(line)
-        if img_match and questions:
-            questions[-1]["has_diagram"] = True
-            questions[-1].setdefault("images_mmd", []).append(img_match.group(1))
-        
-        # Check for tables
-        if '|' in line and current_q and questions:
-            questions[-1]["has_table"] = True
-        
-        # Regular content line
+        # Regular line
         if current_q is not None:
-            current_text_lines.append(line)
+            current_text.append(line)
     
-    flush_current()
+    save_current()
     return questions
 
 def clean_text(text: str) -> str:
-    """Remove LaTeX delimiters for clean text display"""
+    """Clean LaTeX for readable display"""
     t = text
-    t = re.sub(r'\\\(|\\\)', '', t)  # Remove \( \)
-    t = re.sub(r'\\\[|\\\]', '', t)  # Remove \[ \]
-    t = re.sub(r'\\text\{([^}]*)\}', r'\1', t)  # \text{word} → word
-    t = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', t)  # \frac{a}{b} → a/b
-    t = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', t)  # \sqrt{x} → sqrt(x)
-    t = re.sub(r'\\(quad|qquad|,|;|!)\s*', ' ', t)  # spacing commands
+    t = re.sub(r'\\\(|\\\)', '', t)
+    t = re.sub(r'\\\[|\\\]', '', t)
+    t = re.sub(r'\\text\{([^}]*)\}', r'\1', t)
+    t = re.sub(r'\\frac\{([^}]*)\}\{([^}]*)\}', r'\1/\2', t)
+    t = re.sub(r'\\sqrt\{([^}]*)\}', r'sqrt(\1)', t)
+    t = re.sub(r'\\(quad|qquad|,|;|!)\s*', ' ', t)
     t = re.sub(r'\\(times)', 'x', t)
     t = re.sub(r'\\(div)', '÷', t)
     t = re.sub(r'\\(pm)', '±', t)
@@ -491,22 +521,19 @@ def clean_text(text: str) -> str:
     t = re.sub(r'\\(geq)', '≥', t)
     t = re.sub(r'\\(neq)', '≠', t)
     t = re.sub(r'\\(pi)', 'π', t)
-    t = re.sub(r'\^{([^}]*)}', r'^\1', t)  # ^{2} → ^2
-    t = re.sub(r'_{([^}]*)}', r'_\1', t)  # _{n} → _n
-    t = re.sub(r'\\[a-zA-Z]+', '', t)  # Remove remaining LaTeX commands
-    t = re.sub(r'[{}]', '', t)  # Remove braces
-    t = re.sub(r'\n{3,}', '\n\n', t)  # Reduce multiple newlines
+    t = re.sub(r'\^{([^}]*)}', r'^\1', t)
+    t = re.sub(r'_{([^}]*)}', r'_\1', t)
+    t = re.sub(r'\\[a-zA-Z]+', '', t)
+    t = re.sub(r'[{}]', '', t)
+    t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
 
 async def classify_questions_with_gemini(questions_text: str, paper_id: str) -> dict:
-    """ONE Gemini call to classify ALL questions with topics + difficulty"""
+    """ONE Gemini call to classify ALL questions"""
     try:
         client = _init_gemini_client()
         prompt = f"""Classify these GCSE Maths questions. Return JSON only.
-
-For each question number, provide:
-- "difficulty": "bronze" (easy/Foundation), "silver" (standard), or "gold" (hard/Higher)
-- "topics": list of 1-3 relevant GCSE topics from: number-operations, fractions, ratio-proportion, percentages, indices, standard-form, surds, algebraic-expressions, linear-equations, quadratics, factorisation, simultaneous-equations, inequalities, sequences, functions, angles, triangles, circles, area-perimeter, volume-surface-area, trigonometry, pythagoras, transformations, vectors, coordinates, probability, data-handling, averages, cumulative-frequency, histograms
+For each question number: "difficulty" (bronze/silver/gold) and "topics" (1-3 from: number-operations, fractions, ratio-proportion, percentages, indices, standard-form, surds, algebraic-expressions, linear-equations, quadratics, factorisation, simultaneous-equations, inequalities, sequences, functions, angles, triangles, circles, area-perimeter, volume-surface-area, trigonometry, pythagoras, transformations, vectors, coordinates, probability, data-handling, averages, cumulative-frequency, histograms).
 
 Questions:
 {questions_text}
@@ -781,7 +808,7 @@ async def re_extract_paper(paper_id: str):
     return {"message": "Re-extraction started", "job_id": job.id, "paper_id": paper_id}
 
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
-    """Extract using Mathpix for content + Gemini for classification"""
+    """Mathpix extracts EVERYTHING (text, LaTeX, images, tables). Gemini classifies once."""
     try:
         await db.extraction_jobs.update_one(
             {"id": job_id},
@@ -793,37 +820,38 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
             paper.get('exam_year', 0), paper.get('board', 'AQA'), paper.get('paper_number', '1')
         )
         
-        # Open PDF for page count and diagram extraction
         pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
         total_pages = len(pdf_document)
         
         await db.extraction_jobs.update_one(
-            {"id": job_id},
-            {"$set": {"total_pages": total_pages}}
+            {"id": job_id}, {"$set": {"total_pages": total_pages}}
         )
         
-        # STEP 1: Mathpix - extract all text/LaTeX/tables in one call
-        logger.info(f"Submitting to Mathpix: {total_pages} pages")
+        # STEP 1: Mathpix - ONE call extracts text + LaTeX + images + tables
+        logger.info(f"Submitting {total_pages} pages to Mathpix")
         await log_api_call(paper_id, "mathpix_pdf_submit")
         mathpix_pdf_id = mathpix_submit_pdf(pdf_content)
         
         await db.extraction_jobs.update_one(
-            {"id": job_id}, {"$set": {"processed_pages": 1}}
+            {"id": job_id}, {"$set": {"processed_pages": 2}}
         )
         
         # Wait for Mathpix
-        mmd_content = mathpix_wait_and_get(mathpix_pdf_id)
-        logger.info(f"Mathpix returned {len(mmd_content)} chars of markdown")
+        mathpix_poll_status(mathpix_pdf_id)
+        
+        # Get markdown (has image URLs embedded)
+        mmd_content = mathpix_get_mmd(mathpix_pdf_id)
+        logger.info(f"Mathpix: {len(mmd_content)} chars markdown")
         
         await db.extraction_jobs.update_one(
             {"id": job_id}, {"$set": {"processed_pages": total_pages // 2}}
         )
         
-        # STEP 2: Parse Mathpix output into questions
-        parsed_questions = parse_mathpix_to_questions(mmd_content)
-        logger.info(f"Parsed {len(parsed_questions)} questions from Mathpix")
+        # STEP 2: Parse into questions (images come as URLs from Mathpix)
+        parsed_questions = parse_mathpix_mmd(mmd_content)
+        logger.info(f"Parsed {len(parsed_questions)} questions")
         
-        # STEP 3: Gemini - ONE call to classify all questions
+        # STEP 3: ONE Gemini call to classify all questions
         questions_summary = "\n".join([
             f"Q{q['question_number']}: {q['text'][:200]}"
             for q in parsed_questions
@@ -831,29 +859,23 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
         classifications = await classify_questions_with_gemini(questions_summary, paper_id)
         
         await db.extraction_jobs.update_one(
-            {"id": job_id}, {"$set": {"processed_pages": total_pages - 2}}
+            {"id": job_id}, {"$set": {"processed_pages": total_pages - 1}}
         )
         
-        # STEP 4: Extract diagrams using Gemini vision (only for questions that have diagrams)
+        # STEP 4: Save questions with Mathpix images
         all_questions = []
         images_extracted = 0
         
         for q_data in parsed_questions:
             q_number = q_data["question_number"]
             ge_question_id = generate_ge_question_id(ge_code, q_number)
-            
-            # Get classification from Gemini
             q_class = classifications.get(str(q_number), {})
             
-            # Extract diagrams - just crop full page area, NO Gemini calls
+            # Download and save Mathpix images locally
             image_ids = []
-            if q_data.get("has_diagram"):
-                # Use Mathpix's knowledge - save the relevant page as diagram
-                # Estimate which page based on question position
-                est_page = min(q_number - 1, total_pages - 1)
+            for img_url in q_data.get("image_urls", []):
                 try:
-                    page_base64 = convert_page_to_base64(pdf_document, est_page)
-                    img_bytes = base64.b64decode(page_base64)
+                    img_bytes = download_image(img_url)
                     img_id = str(uuid.uuid4())
                     img_path = f"{APP_NAME}/images/{paper_id}/{img_id}.png"
                     put_object(img_path, img_bytes, "image/png")
@@ -861,23 +883,42 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                     img_asset = ImageAsset(
                         id=img_id, paper_id=paper_id,
                         storage_path=img_path,
-                        original_filename=f"page_Q{q_number}.png",
+                        original_filename=f"mathpix_Q{q_number}.png",
                         content_type="image/png",
-                        width=0, height=0,
-                        page_number=est_page + 1,
-                        description=f"Full page for Q{q_number}"
+                        width=0, height=0, page_number=0,
+                        description=f"Mathpix extracted diagram Q{q_number}"
                     )
                     await db.image_assets.insert_one(img_asset.model_dump())
                     image_ids.append(img_id)
                     images_extracted += 1
                 except Exception as e:
-                    logger.error(f"Error saving page image Q{q_number}: {e}")
+                    logger.error(f"Error downloading Mathpix image: {e}")
             
-            # Build parts with GE IDs
+            # Build parts
             parts = []
             for part_data in q_data.get("parts", []):
                 part_label = part_data.get("part_label", "")
                 ge_part_id = generate_ge_part_id(ge_question_id, part_label) if part_label else None
+                # Parts also get their own images + parent images
+                part_img_ids = list(image_ids)
+                for pimg_url in part_data.get("image_urls", []):
+                    try:
+                        img_bytes = download_image(pimg_url)
+                        img_id = str(uuid.uuid4())
+                        img_path = f"{APP_NAME}/images/{paper_id}/{img_id}.png"
+                        put_object(img_path, img_bytes, "image/png")
+                        img_asset = ImageAsset(
+                            id=img_id, paper_id=paper_id, storage_path=img_path,
+                            original_filename=f"mathpix_Q{q_number}{part_label}.png",
+                            content_type="image/png", width=0, height=0, page_number=0,
+                            description=f"Diagram Q{q_number}({part_label})"
+                        )
+                        await db.image_assets.insert_one(img_asset.model_dump())
+                        part_img_ids.append(img_id)
+                        images_extracted += 1
+                    except Exception as e:
+                        logger.error(f"Error downloading part image: {e}")
+                
                 parts.append(QuestionPart(
                     part_label=part_label,
                     text=part_data.get("text", ""),
@@ -885,7 +926,7 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                     marks=part_data.get("marks"),
                     confidence=0.95,
                     ge_id=ge_part_id,
-                    images=image_ids
+                    images=part_img_ids
                 ))
             
             question = Question(
@@ -914,20 +955,16 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
         await db.extraction_jobs.update_one(
             {"id": job_id},
             {"$set": {
-                "status": "completed",
-                "processed_pages": total_pages,
-                "questions_found": len(all_questions),
-                "images_extracted": images_extracted,
+                "status": "completed", "processed_pages": total_pages,
+                "questions_found": len(all_questions), "images_extracted": images_extracted,
                 "completed_at": datetime.now(timezone.utc).isoformat()
             }}
         )
-        
         await db.papers.update_one(
             {"id": paper_id},
             {"$set": {"status": "extracted", "total_questions": len(all_questions)}}
         )
-        
-        logger.info(f"Extraction done: {len(all_questions)} questions, {images_extracted} images")
+        logger.info(f"Done: {len(all_questions)} questions, {images_extracted} images (Mathpix + 1 Gemini call)")
         
     except Exception as e:
         logger.error(f"Extraction failed: {e}")
@@ -1119,7 +1156,7 @@ async def get_image(image_id: str):
     return image
 
 @api_router.get("/images/{image_id}/download")
-async def download_image(image_id: str):
+async def download_image_endpoint(image_id: str):
     """Download the actual image file"""
     image = await db.image_assets.find_one({"id": image_id, "is_deleted": False}, {"_id": 0})
     if not image:
