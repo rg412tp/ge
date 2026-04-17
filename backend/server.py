@@ -477,7 +477,7 @@ def convert_page_to_base64(pdf_document, page_number: int, dpi: int = 150) -> st
     return base64.b64encode(img_data).decode('utf-8')
 
 def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float], dpi: int = 200) -> bytes:
-    """Crop a specific region from a PDF page with smart edge trimming"""
+    """Crop a specific region from a PDF page - uses AI bounding box directly"""
     page = pdf_document[page_number]
     mat = fitz.Matrix(dpi/72, dpi/72)
     pix = page.get_pixmap(matrix=mat)
@@ -491,97 +491,71 @@ def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float],
     w = int(bbox['width_percent'] / 100 * img.width)
     h = int(bbox['height_percent'] / 100 * img.height)
     
-    # Clamp to image bounds (NO padding - we want tight crops)
+    # Clamp to image bounds - NO padding, NO trimming
     x = max(0, x)
     y = max(0, y)
     w = min(img.width - x, w)
     h = min(img.height - y, h)
     
-    # Crop
+    # Crop using AI's bounding box directly
     cropped = img.crop((x, y, x + w, y + h))
-    
-    # Smart edge trimming: detect and remove text-heavy edges
-    cropped = trim_text_edges(cropped)
     
     # Save to bytes
     img_byte_arr = io.BytesIO()
     cropped.save(img_byte_arr, format='PNG', optimize=True)
     return img_byte_arr.getvalue()
 
-def trim_text_edges(img, strip_size=30, threshold=0.85):
-    """Trim edges that appear to contain text (high contrast thin marks on white background).
-    Scans strips from each edge inward and trims if they look like text lines."""
-    import numpy as np
-    
-    arr = np.array(img)
-    h, w = arr.shape[:2]
-    
-    if h < 80 or w < 80:
-        return img  # Too small to trim
-    
-    # Convert to grayscale for analysis
-    gray = np.mean(arr, axis=2)
-    
-    # A text strip has mostly white (>240) pixels with some dark (<100) pixels
-    # A diagram strip has more varied pixel values (grid lines, fills, etc.)
-    
-    def is_text_strip(strip):
-        """Check if a horizontal or vertical strip looks like text rather than diagram"""
-        if strip.size == 0:
-            return False
-        white_ratio = np.mean(strip > 240)
-        dark_ratio = np.mean(strip < 100)
-        # Text: lots of white background with scattered dark text pixels
-        # Typically >70% white with 0.5-20% dark (text characters)
-        # More aggressive detection to catch partial text lines
-        return white_ratio > 0.70 and 0.003 < dark_ratio < 0.25
-    
-    # Trim top edge
-    top_trim = 0
-    for i in range(0, min(h // 4, 150), strip_size):
-        strip = gray[i:i+strip_size, w//6:w*5//6]  # Check middle portion
-        if is_text_strip(strip):
-            top_trim = i + strip_size
-        else:
-            break
-    
-    # Trim bottom edge - scan from bottom upward, be more aggressive
-    bottom_trim = h
-    for i in range(h, max(h * 3 // 4, h - 150), -strip_size):
-        strip = gray[max(0,i-strip_size):i, w//6:w*5//6]
-        if is_text_strip(strip):
-            bottom_trim = i - strip_size
-        else:
-            break
-    
-    # Trim left edge
-    left_trim = 0
-    for i in range(0, min(w // 4, 100), strip_size):
-        strip = gray[h//6:h*5//6, i:i+strip_size]
-        if is_text_strip(strip):
-            left_trim = i + strip_size
-        else:
-            break
-    
-    # Trim right edge  
-    right_trim = w
-    for i in range(w, max(w * 3 // 4, w - 100), -strip_size):
-        strip = gray[h//6:h*5//6, max(0,i-strip_size):i]
-        if is_text_strip(strip):
-            right_trim = i - strip_size
-        else:
-            break
-    
-    # Only trim if we're not removing too much (safety: keep at least 60% of original)
-    if (right_trim - left_trim) < w * 0.5 or (bottom_trim - top_trim) < h * 0.5:
-        return img
-    
-    # Apply trim
-    if top_trim > 0 or bottom_trim < h or left_trim > 0 or right_trim < w:
-        logger.info(f"Trimming edges: top={top_trim}, bottom={h-bottom_trim}, left={left_trim}, right={w-right_trim}")
-        return img.crop((left_trim, top_trim, right_trim, bottom_trim))
-    
-    return img
+async def refine_crop_with_ai(cropped_base64: str, paper_id: str, question_number: int) -> Dict[str, Any]:
+    """Send a cropped image back to AI to check if it needs tighter cropping"""
+    try:
+        chat = LlmChat(
+            api_key=EMERGENT_KEY,
+            session_id=f"refine-{paper_id}-q{question_number}-{uuid.uuid4().hex[:6]}",
+            system_message="""You are checking a cropped diagram from a GCSE Maths exam paper.
+
+Look at this cropped image and determine if it contains any question text that should NOT be in the crop.
+The crop should ONLY contain the visual diagram/graph/shape and its internal labels (measurements, axis values).
+
+If the crop is clean (no unwanted text), return:
+{"needs_recrop": false}
+
+If there is unwanted text bleeding into the crop, return a tighter bounding box as percentages of THIS cropped image:
+{
+  "needs_recrop": true,
+  "tighter_box": {
+    "x_percent": 5,
+    "y_percent": 10,
+    "width_percent": 90,
+    "height_percent": 80
+  },
+  "text_found": "description of unwanted text"
+}
+
+Internal labels like "5 m", "12 m", axis numbers, axis titles are PART of the diagram - do NOT remove those.
+Only remove actual question text paragraphs that surround the diagram."""
+        ).with_model("openai", "gpt-5.2")
+        
+        image_content = ImageContent(image_base64=cropped_base64)
+        user_message = UserMessage(
+            text="Check if this cropped diagram has any question text bleeding in. If clean, return {\"needs_recrop\": false}. If text is bleeding, provide tighter bounds as JSON.",
+            file_contents=[image_content]
+        )
+        
+        response = await chat.send_message(user_message)
+        
+        import json
+        response_text = response.strip()
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+        
+        return json.loads(response_text.strip())
+    except Exception as e:
+        logger.error(f"Error in crop refinement: {e}")
+        return {"needs_recrop": False}
 
 # ============ GE ID Generation ============
 def generate_ge_code(exam_year: int, paper_number: str) -> str:
@@ -757,6 +731,29 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                                         cropped_img = crop_image_from_page(
                                             pdf_document, page_num, diag["bounding_box"]
                                         )
+                                        
+                                        # Two-pass refinement: check if crop needs tightening
+                                        cropped_base64 = base64.b64encode(cropped_img).decode('utf-8')
+                                        refine_result = await refine_crop_with_ai(cropped_base64, paper_id, q_number)
+                                        
+                                        if refine_result.get("needs_recrop") and refine_result.get("tighter_box"):
+                                            logger.info(f"Refining crop for Q{q_number}: {refine_result.get('text_found', '')}")
+                                            # Re-crop the already cropped image with tighter bounds
+                                            from PIL import Image as PILImage
+                                            crop_img = PILImage.open(io.BytesIO(cropped_img))
+                                            tb = refine_result["tighter_box"]
+                                            cx = int(tb['x_percent'] / 100 * crop_img.width)
+                                            cy = int(tb['y_percent'] / 100 * crop_img.height)
+                                            cw = int(tb['width_percent'] / 100 * crop_img.width)
+                                            ch = int(tb['height_percent'] / 100 * crop_img.height)
+                                            cx = max(0, cx)
+                                            cy = max(0, cy)
+                                            cw = min(crop_img.width - cx, cw)
+                                            ch = min(crop_img.height - cy, ch)
+                                            refined = crop_img.crop((cx, cy, cx + cw, cy + ch))
+                                            img_byte_arr = io.BytesIO()
+                                            refined.save(img_byte_arr, format='PNG', optimize=True)
+                                            cropped_img = img_byte_arr.getvalue()
                                         
                                         # Upload cropped image
                                         img_id = str(uuid.uuid4())
