@@ -38,24 +38,51 @@ const API = `${BACKEND_URL}/api`;
 const renderLatex = (text, latex) => {
   if (!latex) return <span className="whitespace-pre-wrap">{text}</span>;
   
-  // Parse and render LaTeX content
   try {
-    // Split by LaTeX delimiters and render
-    const parts = latex.split(/(\\\(.*?\\\)|\\\[.*?\\\])/g);
-    return (
-      <span>
-        {parts.map((part, idx) => {
-          if (part.startsWith('\\(') && part.endsWith('\\)')) {
-            const math = part.slice(2, -2);
-            return <InlineMath key={idx} math={math} />;
-          } else if (part.startsWith('\\[') && part.endsWith('\\]')) {
-            const math = part.slice(2, -2);
-            return <BlockMath key={idx} math={math} />;
-          }
-          return <span key={idx}>{part}</span>;
-        })}
-      </span>
-    );
+    // Check if the content has explicit LaTeX delimiters \( \) or \[ \]
+    const hasDelimiters = /\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]/s.test(latex);
+    
+    if (hasDelimiters) {
+      const parts = latex.split(/(\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\])/g);
+      return (
+        <span>
+          {parts.map((part, idx) => {
+            if (part.startsWith('\\(') && part.endsWith('\\)')) {
+              const math = part.slice(2, -2);
+              try { return <InlineMath key={idx} math={math} />; } catch { return <span key={idx}>{math}</span>; }
+            } else if (part.startsWith('\\[') && part.endsWith('\\]')) {
+              const math = part.slice(2, -2);
+              try { return <BlockMath key={idx} math={math} />; } catch { return <span key={idx}>{math}</span>; }
+            }
+            return <span key={idx}>{part}</span>;
+          })}
+        </span>
+      );
+    }
+    
+    // Check if content has LaTeX commands that KaTeX can render
+    const hasLatexCmds = /\\(text|frac|tfrac|sqrt|cdot|times|div|pm|leq|geq|neq|approx|rightarrow|begin|end|quad|displaystyle)/i.test(latex);
+    
+    if (hasLatexCmds) {
+      try {
+        return <BlockMath math={latex} />;
+      } catch {
+        return <span className="whitespace-pre-wrap">{text}</span>;
+      }
+    }
+    
+    // If latex has long english words (5+ chars) without backslash, it's probably plain text being passed as latex
+    const hasLongWords = /(?<!\\)[a-zA-Z]{5,}/.test(latex);
+    if (hasLongWords) {
+      return <span className="whitespace-pre-wrap">{text}</span>;
+    }
+    
+    // Simple math expression
+    try {
+      return <InlineMath math={latex} />;
+    } catch {
+      return <span className="whitespace-pre-wrap">{text}</span>;
+    }
   } catch (e) {
     return <span className="whitespace-pre-wrap">{text}</span>;
   }
@@ -644,6 +671,10 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
   const [markSchemeEntries, setMarkSchemeEntries] = useState([]);
   const [updating, setUpdating] = useState(false);
   const [showMarkScheme, setShowMarkScheme] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [editMarks, setEditMarks] = useState("");
+  const [editParts, setEditParts] = useState([]);
 
   useEffect(() => {
     if (question?.images?.length > 0) {
@@ -661,11 +692,17 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
       setImages([]);
     }
 
-    // Fetch mark scheme entries
     if (question?.id) {
       axios.get(`${API}/questions/${question.id}/mark-scheme`)
         .then(res => setMarkSchemeEntries(res.data))
         .catch(() => setMarkSchemeEntries([]));
+    }
+
+    // Populate edit fields
+    if (question) {
+      setEditText(question.text || "");
+      setEditMarks(question.marks?.toString() || "");
+      setEditParts(question.parts?.map(p => ({ ...p })) || []);
     }
   }, [question]);
 
@@ -715,6 +752,50 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
     }
   };
 
+  const handleSaveEdit = async () => {
+    setUpdating(true);
+    try {
+      const updates = { text: editText };
+      if (editMarks) updates.marks = parseInt(editMarks);
+      if (editParts.length > 0) updates.parts = editParts;
+      await axios.patch(`${API}/questions/${question.id}`, updates);
+      toast.success("Question updated!");
+      setEditMode(false);
+      onUpdate();
+    } catch (error) {
+      toast.error("Failed to update");
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const handleReplaceImage = async (e, oldImageId) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    if (oldImageId) formData.append("old_image_id", oldImageId);
+    try {
+      await axios.post(`${API}/questions/${question.id}/replace-image`, formData, {
+        headers: { "Content-Type": "multipart/form-data" }
+      });
+      toast.success("Image replaced!");
+      onUpdate();
+    } catch (error) {
+      toast.error("Failed to replace image");
+    }
+  };
+
+  const handleRemoveImage = async (imageId) => {
+    try {
+      await axios.delete(`${API}/questions/${question.id}/images/${imageId}`);
+      toast.success("Image removed!");
+      onUpdate();
+    } catch (error) {
+      toast.error("Failed to remove image");
+    }
+  };
+
   if (!question) {
     return (
       <div className="h-full flex items-center justify-center text-slate-500">
@@ -739,12 +820,19 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
         </div>
         <div className="flex gap-2">
           <button
+            data-testid="edit-question-btn"
+            onClick={() => setEditMode(!editMode)}
+            className={`px-3 py-2 border border-black text-xs ${editMode ? "bg-amber-50 border-amber-600" : ""}`}
+          >
+            {editMode ? "Cancel" : "Edit"}
+          </button>
+          <button
             data-testid="toggle-markscheme-btn"
             onClick={() => setShowMarkScheme(!showMarkScheme)}
             className={`px-3 py-2 border border-black text-xs flex items-center gap-1 ${showMarkScheme ? "bg-green-50" : ""}`}
           >
             <ListChecks size={14} />
-            {showMarkScheme ? "Hide" : "Show"} MS
+            MS
           </button>
           <button
             data-testid="approve-question-btn"
@@ -753,7 +841,6 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
             className="btn-primary flex items-center gap-1 text-sm py-2 px-3 disabled:opacity-50"
           >
             <Check size={14} weight="bold" />
-            Approve
           </button>
           <button
             data-testid="reject-question-btn"
@@ -762,7 +849,6 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
             className="btn-secondary flex items-center gap-1 text-sm py-2 px-3"
           >
             <X size={14} weight="bold" />
-            Reject
           </button>
         </div>
       </div>
@@ -785,32 +871,79 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
           </div>
         </div>
 
-        {/* Question text with LaTeX */}
+        {/* Question text */}
         <div className="mb-4">
           <label className="text-xs tracking-widest uppercase font-bold block mb-2">Question</label>
-          <div className="border border-black p-4 bg-slate-50">
-            {renderLatex(question.text, question.latex)}
-          </div>
+          {editMode ? (
+            <textarea
+              data-testid="edit-question-text"
+              value={editText}
+              onChange={(e) => setEditText(e.target.value)}
+              className="w-full border border-black p-3 font-mono text-sm min-h-[100px]"
+            />
+          ) : (
+            <div className="border border-black p-4 bg-slate-50">
+              {renderLatex(question.text, question.latex)}
+            </div>
+          )}
         </div>
+
+        {/* Marks - editable */}
+        {editMode && (
+          <div className="mb-4">
+            <label className="text-xs tracking-widest uppercase font-bold block mb-2">Total Marks</label>
+            <input
+              data-testid="edit-marks-input"
+              type="number"
+              value={editMarks}
+              onChange={(e) => setEditMarks(e.target.value)}
+              className="border border-black p-2 w-24 text-sm"
+            />
+          </div>
+        )}
         
         {/* Parts */}
         {question.parts?.length > 0 && (
           <div className="mb-4">
             <label className="text-xs tracking-widest uppercase font-bold block mb-2">Parts</label>
             <div className="border border-black">
-              {question.parts.map((part, idx) => (
+              {(editMode ? editParts : question.parts).map((part, idx) => (
                 <div key={idx} className="p-3 border-b border-black last:border-b-0">
                   <div className="flex items-center gap-2 mb-2">
                     <span className="font-bold">({part.part_label})</span>
                     {part.ge_id && (
                       <span className="text-xs font-mono px-1 border border-blue-800 bg-blue-50 text-blue-800">{part.ge_id}</span>
                     )}
-                    {part.marks && (
-                      <span className="text-xs px-2 py-0.5 border border-black">{part.marks} marks</span>
+                    {editMode ? (
+                      <input
+                        type="number"
+                        value={part.marks || ""}
+                        onChange={(e) => {
+                          const updated = [...editParts];
+                          updated[idx] = { ...updated[idx], marks: parseInt(e.target.value) || null };
+                          setEditParts(updated);
+                        }}
+                        className="border border-black px-2 py-0.5 w-16 text-xs"
+                        placeholder="marks"
+                      />
+                    ) : (
+                      part.marks && <span className="text-xs px-2 py-0.5 border border-black">{part.marks} marks</span>
                     )}
                   </div>
-                  <div className="text-sm">{renderLatex(part.text, part.latex)}</div>
-                  {part.mark_scheme && (
+                  {editMode ? (
+                    <textarea
+                      value={part.text || ""}
+                      onChange={(e) => {
+                        const updated = [...editParts];
+                        updated[idx] = { ...updated[idx], text: e.target.value };
+                        setEditParts(updated);
+                      }}
+                      className="w-full border border-slate-300 p-2 text-sm font-mono min-h-[60px]"
+                    />
+                  ) : (
+                    <div className="text-sm">{renderLatex(part.text, part.latex)}</div>
+                  )}
+                  {part.mark_scheme && !editMode && (
                     <div className="mt-2 p-2 bg-green-50 border-l-2 border-green-600 text-xs">
                       <strong>Mark Scheme:</strong> {renderLatex(part.mark_scheme, part.mark_scheme_latex)}
                     </div>
@@ -820,19 +953,43 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
             </div>
           </div>
         )}
+
+        {/* Save button in edit mode */}
+        {editMode && (
+          <button
+            data-testid="save-edit-btn"
+            onClick={handleSaveEdit}
+            disabled={updating}
+            className="btn-primary w-full mb-4 disabled:opacity-50"
+          >
+            {updating ? "Saving..." : "Save Changes"}
+          </button>
+        )}
         
-        {/* Images/Diagrams */}
-        {images.length > 0 && (
-          <div className="mb-4">
-            <label className="text-xs tracking-widest uppercase font-bold block mb-2">
+        {/* Images/Diagrams with replace/remove */}
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-xs tracking-widest uppercase font-bold">
               Diagrams ({images.length})
             </label>
+            <label className="text-xs px-2 py-1 border border-dashed border-black cursor-pointer hover:bg-slate-100">
+              <Plus size={10} className="inline mr-1" /> Add Image
+              <input
+                data-testid="add-image-input"
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => handleReplaceImage(e, null)}
+              />
+            </label>
+          </div>
+          {images.length > 0 ? (
             <div className="grid grid-cols-2 gap-3">
               {images.map((img) => (
                 <div
                   key={img.id}
                   data-testid={`diagram-${img.id}`}
-                  className="border border-black p-2 relative"
+                  className="border border-black p-2 relative group"
                 >
                   <div className="absolute -top-2 left-2 bg-white px-1 text-xs font-mono">
                     Fig {img.page_number}
@@ -842,11 +999,33 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
                     alt={img.description || "Diagram"}
                     className="w-full h-auto"
                   />
+                  {/* Image action buttons */}
+                  <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <label className="p-1 bg-white border border-black cursor-pointer hover:bg-blue-50 text-xs">
+                      Replace
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => handleReplaceImage(e, img.id)}
+                      />
+                    </label>
+                    <button
+                      onClick={() => handleRemoveImage(img.id)}
+                      className="p-1 bg-white border border-red-500 text-red-600 hover:bg-red-50 text-xs"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="border border-dashed border-slate-400 p-4 text-center text-slate-500 text-xs">
+              No diagrams
+            </div>
+          )}
+        </div>
 
         {/* Mark Scheme Panel */}
         {showMarkScheme && (

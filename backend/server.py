@@ -558,16 +558,24 @@ Only remove actual question text paragraphs that surround the diagram."""
         return {"needs_recrop": False}
 
 # ============ GE ID Generation ============
-def generate_ge_code(exam_year: int, paper_number: str) -> str:
-    """Generate GE code for a paper: GE-2017-P1"""
-    return f"GE-{exam_year}-P{paper_number}"
+BOARD_CODES = {"AQA": "AQ", "Edexcel": "EX", "OCR": "OC"}
 
-def generate_ge_question_id(ge_code: str, question_number: int) -> str:
-    """Generate GE ID for a question: GE-2017-P1-Q01"""
-    return f"{ge_code}-Q{str(question_number).zfill(2)}"
+def generate_ge_code(exam_year: int, board: str, paper_number: str) -> str:
+    """Generate GE code for a paper: GE17EX1"""
+    yr = str(exam_year)[-2:]  # Last 2 digits: 2017 → 17
+    board_code = BOARD_CODES.get(board, board[:2].upper())
+    return f"GE{yr}{board_code}{paper_number}"
+
+def generate_ge_question_id(ge_code: str, question_number: int, import_year: int = None) -> str:
+    """Generate GE ID for a question: GE17EX126001"""
+    if import_year is None:
+        import_year = datetime.now(timezone.utc).year
+    yr_code = str(import_year)[-2:]  # 2026 → 26
+    seq = str(question_number).zfill(3)  # 1 → 001
+    return f"{ge_code}{yr_code}{seq}"
 
 def generate_ge_part_id(ge_question_id: str, part_label: str) -> str:
-    """Generate GE ID for a sub-part: GE-2017-P1-Q01A"""
+    """Generate GE ID for a sub-part: GE17EX126001A"""
     return f"{ge_question_id}{part_label.upper()}"
 
 # ============ API Endpoints ============
@@ -583,8 +591,7 @@ async def health():
 @api_router.post("/papers", response_model=Paper)
 async def create_paper(paper_data: PaperCreate):
     paper = Paper(**paper_data.model_dump())
-    # Generate GE code
-    paper.ge_code = generate_ge_code(paper.exam_year, paper.paper_number)
+    paper.ge_code = generate_ge_code(paper.exam_year, paper.board, paper.paper_number)
     doc = paper.model_dump()
     await db.papers.insert_one(doc)
     return paper
@@ -689,7 +696,9 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
         
         # Get paper for GE code
         paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
-        ge_code = paper.get("ge_code", f"GE-{paper.get('exam_year', 0)}-P{paper.get('paper_number', '1')}")
+        ge_code = paper.get("ge_code") or generate_ge_code(
+            paper.get('exam_year', 0), paper.get('board', 'AQA'), paper.get('paper_number', '1')
+        )
         
         # Open PDF
         pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
@@ -787,6 +796,8 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                             q_data["images"] = image_ids
                         
                         # Create question record with GE IDs
+                        # Shared images: parts inherit images from parent question
+                        question_images = q_data.get("images", [])
                         parts = []
                         for part_data in q_data.get("parts", []):
                             part_label = part_data.get("part_label", "")
@@ -797,7 +808,8 @@ async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str)
                                 latex=part_data.get("latex"),
                                 marks=part_data.get("marks"),
                                 confidence=extraction_result.get("confidence", 0.8),
-                                ge_id=ge_part_id
+                                ge_id=ge_part_id,
+                                images=question_images  # Each part gets the shared images
                             ))
                         
                         question = Question(
@@ -953,6 +965,95 @@ async def reject_question(question_id: str, reason: Optional[str] = None):
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Question not found")
     return {"message": "Question rejected"}
+
+# ============ Image Replace Endpoint ============
+@api_router.post("/questions/{question_id}/replace-image")
+async def replace_question_image(question_id: str, file: UploadFile = File(...), old_image_id: Optional[str] = None):
+    """Replace or add an image for a question"""
+    question = await db.questions.find_one({"id": question_id}, {"_id": 0})
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    
+    # Read image
+    img_data = await file.read()
+    
+    # Upload to storage
+    img_id = str(uuid.uuid4())
+    ext = file.filename.split(".")[-1] if "." in file.filename else "png"
+    img_path = f"{APP_NAME}/images/{question['paper_id']}/{img_id}.{ext}"
+    put_object(img_path, img_data, file.content_type or "image/png")
+    
+    # Get image dimensions
+    try:
+        pil_img = Image.open(io.BytesIO(img_data))
+        width, height = pil_img.size
+    except Exception:
+        width, height = 0, 0
+    
+    # Create image asset
+    img_asset = ImageAsset(
+        id=img_id,
+        paper_id=question["paper_id"],
+        question_id=question_id,
+        storage_path=img_path,
+        original_filename=file.filename,
+        content_type=file.content_type or "image/png",
+        width=width,
+        height=height,
+        page_number=0,
+        description="Manually uploaded replacement"
+    )
+    await db.image_assets.insert_one(img_asset.model_dump())
+    
+    # Update question images list
+    current_images = question.get("images", [])
+    if old_image_id and old_image_id in current_images:
+        # Replace old with new
+        current_images = [img_id if x == old_image_id else x for x in current_images]
+        # Soft-delete old image
+        await db.image_assets.update_one({"id": old_image_id}, {"$set": {"is_deleted": True}})
+    else:
+        # Add new image
+        current_images.append(img_id)
+    
+    await db.questions.update_one(
+        {"id": question_id},
+        {"$set": {"images": current_images, "has_diagram": True}}
+    )
+    
+    # Also update parts to share the new image
+    parts = question.get("parts", [])
+    if parts:
+        for part in parts:
+            if old_image_id and old_image_id in part.get("images", []):
+                part["images"] = [img_id if x == old_image_id else x for x in part["images"]]
+            elif not part.get("images"):
+                part["images"] = current_images
+        await db.questions.update_one(
+            {"id": question_id},
+            {"$set": {"parts": parts}}
+        )
+    
+    return {"message": "Image replaced", "new_image_id": img_id, "images": current_images}
+
+@api_router.delete("/questions/{question_id}/images/{image_id}")
+async def remove_question_image(question_id: str, image_id: str):
+    """Remove an image from a question"""
+    question = await db.questions.find_one({"id": question_id}, {"_id": 0})
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    
+    # Remove from question images list
+    current_images = [x for x in question.get("images", []) if x != image_id]
+    await db.questions.update_one(
+        {"id": question_id},
+        {"$set": {"images": current_images, "has_diagram": len(current_images) > 0}}
+    )
+    
+    # Soft-delete image
+    await db.image_assets.update_one({"id": image_id}, {"$set": {"is_deleted": True}})
+    
+    return {"message": "Image removed"}
 
 # Image endpoints
 @api_router.get("/images/{image_id}")

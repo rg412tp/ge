@@ -1,41 +1,27 @@
 # GCSE Question Bank Platform - PRD
 
 ## Original Problem Statement
-Build a database for Genius Education (GE) tuition center to extract GCSE Maths questions from PDF files. Extract questions with their diagrams, crop images cleanly (no bleeding text), and store in a database format for reuse. Custom GE ID system for parent-child question tracking. Support marks, difficulty levels, topics, and marking schemes.
+Build a question bank database for Genius Education (GE) tuition center. Extract GCSE Maths questions from PDFs with clean image crops. Custom GE ID system with parent-child hierarchy. Editable fields. Mark scheme linking. Future: AI answer recommendation, Hostinger deployment.
 
-## What's Been Implemented
+## GE ID Format
+- Paper: `GE{2-digit exam year}{Board: EX/AQ/OC}{Paper#}` → `GE17EX1`
+- Question: `GE{year}{board}{paper}{2-digit import year}{3-digit seq}` → `GE17EX126001`
+- Sub-part: Append letter → `GE17EX126001A`, `GE17EX126001B`
+- Import year auto-set to current year (2026→26, 2027→27)
 
-### Phase 1 (Initial MVP)
-- Paper CRUD, PDF upload, AI extraction pipeline, question approval workflow, stats, Swiss brutalist UI
-
-### Phase 2 (Current)
-- **CRITICAL FIX**: Fixed `image_contents` → `file_contents` in GPT-5.2 vision calls
-- GE ID system: Papers (GE-2017-P1), Questions (GE-2017-P1-Q01), Parts (GE-2017-P1-Q01A)
-- Mark scheme PDF upload + AI extraction + auto-linking
-- 30 GCSE topics across 4 categories
+## What's Implemented
+- PDF upload + GPT-5.2 vision extraction (23 questions from 20 pages)
+- Two-pass AI diagram cropping (bounding box + refinement)
+- GE ID system with parent-child chain
+- LaTeX rendering (KaTeX) - handles \text{}, \frac{}, mixed content
+- Mark scheme upload + extraction + auto-linking
 - Difficulty tagging (Bronze/Silver/Gold)
-- LaTeX rendering with KaTeX
-- Collapsible left pane with paper selection → question list flow
-- Real extraction tested: 23 questions + 10 diagrams from a 20-page PDF
+- 30 GCSE topics across 4 categories
+- Editable fields: text, marks, parts, images (replace/add/remove)
+- Re-extract button for improved re-processing
+- Shared images across question parts
 
-## Verified Extraction Results
-- 23 questions extracted from Edexcel 2017 Paper 1
-- Diagrams cropped cleanly (square with labels, graphs, geometric shapes)
-- Questions correctly tagged: Q1-Q22 with difficulty (bronze → gold)
-- Parts identified: Q1(a-d), Q8(a-b), Q11(a-c), Q12(a-b), etc.
-- Topics auto-suggested: scatter graphs, quadratics, trigonometry, vectors, etc.
-- LaTeX rendering confirmed working for mathematical expressions
-
-## Prioritized Backlog
-### P0 (Next)
-- Bulk question approval workflow
-- Test mark scheme upload and linking
-
-### P1 (Important)  
-- Export questions to PDF/docx formats
-- Assignment builder (pick by topic + difficulty)
-- Question search by text
-
-### P2 (Nice to Have)
-- User authentication
-- Student-facing delivery
+## Next
+- Test mark scheme upload end-to-end
+- Hostinger database sync/offline copy
+- AI answer recommendation module (Google/Anthropic keys)
