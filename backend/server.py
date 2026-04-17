@@ -406,10 +406,21 @@ async def extract_diagram_from_page(page_image_base64: str, page_number: int, pa
         chat = LlmChat(
             api_key=EMERGENT_KEY,
             session_id=f"diagram-{paper_id}-page-{page_number}-q{question_number}",
-            system_message="""You are an expert at identifying diagram boundaries in exam papers.
+            system_message="""You are an expert at identifying PRECISE diagram boundaries in GCSE Maths exam papers for clean cropping.
 
-Your task is to identify the bounding box of any diagrams, graphs, figures, or tables on this page.
+CRITICAL RULES FOR BOUNDING BOXES:
+1. The bounding box must ONLY contain the visual diagram/graph/figure itself
+2. Do NOT include any question text, labels outside the diagram frame, or surrounding paragraphs
+3. For graphs: include the axes, grid, plotted points, and axis labels (numbers on axes, axis titles like "Number of hours"). Do NOT include question text above or below the graph
+4. For geometric shapes: include only the shape and its internal labels (side lengths, angles). Do NOT include question text
+5. For tables: include only the table grid and its contents. Do NOT include surrounding text
+6. The top edge should start at the TOP of the graph frame/border, NOT at surrounding text
+7. The bottom edge should end at the BOTTOM axis label or x-axis title, NOT at question text below
+8. The left edge should start at the y-axis or just before the y-axis labels
+9. The right edge should end at the right border of the graph/diagram
+
 The coordinates should be in percentages of the page dimensions (0-100).
+Be VERY precise - err on the side of making the box SMALLER rather than LARGER. It's better to slightly clip a graph edge than to include question text.
 
 Return a JSON object with this structure:
 {
@@ -419,24 +430,22 @@ Return a JSON object with this structure:
       "type": "graph",
       "description": "Coordinate grid with plotted points",
       "bounding_box": {
-        "x_percent": 10,
-        "y_percent": 30,
-        "width_percent": 80,
-        "height_percent": 40
+        "x_percent": 15,
+        "y_percent": 25,
+        "width_percent": 65,
+        "height_percent": 45
       }
     }
   ],
   "has_diagrams": true
 }
 
-If there are no diagrams, return: {"diagrams": [], "has_diagrams": false}
-
-Be precise with boundaries - ensure no text bleeds into the diagram crop."""
+If there are no diagrams, return: {"diagrams": [], "has_diagrams": false}"""
         ).with_model("openai", "gpt-5.2")
         
         image_content = ImageContent(image_base64=page_image_base64)
         user_message = UserMessage(
-            text=f"Identify the bounding boxes of all diagrams, graphs, figures, or tables on this page. Focus on question {question_number} if specified. Return valid JSON.",
+            text=f"Identify the TIGHT bounding boxes of diagrams/graphs/figures on this page for question {question_number}. The crop must NOT include any question text - only the visual element itself (axes, grid, shapes, labels ON the diagram). Return valid JSON.",
             file_contents=[image_content]
         )
         
@@ -468,7 +477,7 @@ def convert_page_to_base64(pdf_document, page_number: int, dpi: int = 150) -> st
     return base64.b64encode(img_data).decode('utf-8')
 
 def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float], dpi: int = 200) -> bytes:
-    """Crop a specific region from a PDF page"""
+    """Crop a specific region from a PDF page with smart edge trimming"""
     page = pdf_document[page_number]
     mat = fitz.Matrix(dpi/72, dpi/72)
     pix = page.get_pixmap(matrix=mat)
@@ -482,20 +491,97 @@ def crop_image_from_page(pdf_document, page_number: int, bbox: Dict[str, float],
     w = int(bbox['width_percent'] / 100 * img.width)
     h = int(bbox['height_percent'] / 100 * img.height)
     
-    # Add small padding
-    padding = 10
-    x = max(0, x - padding)
-    y = max(0, y - padding)
-    w = min(img.width - x, w + 2*padding)
-    h = min(img.height - y, h + 2*padding)
+    # Clamp to image bounds (NO padding - we want tight crops)
+    x = max(0, x)
+    y = max(0, y)
+    w = min(img.width - x, w)
+    h = min(img.height - y, h)
     
     # Crop
     cropped = img.crop((x, y, x + w, y + h))
+    
+    # Smart edge trimming: detect and remove text-heavy edges
+    cropped = trim_text_edges(cropped)
     
     # Save to bytes
     img_byte_arr = io.BytesIO()
     cropped.save(img_byte_arr, format='PNG', optimize=True)
     return img_byte_arr.getvalue()
+
+def trim_text_edges(img, strip_size=30, threshold=0.85):
+    """Trim edges that appear to contain text (high contrast thin marks on white background).
+    Scans strips from each edge inward and trims if they look like text lines."""
+    import numpy as np
+    
+    arr = np.array(img)
+    h, w = arr.shape[:2]
+    
+    if h < 80 or w < 80:
+        return img  # Too small to trim
+    
+    # Convert to grayscale for analysis
+    gray = np.mean(arr, axis=2)
+    
+    # A text strip has mostly white (>240) pixels with some dark (<100) pixels
+    # A diagram strip has more varied pixel values (grid lines, fills, etc.)
+    
+    def is_text_strip(strip):
+        """Check if a horizontal or vertical strip looks like text rather than diagram"""
+        if strip.size == 0:
+            return False
+        white_ratio = np.mean(strip > 240)
+        dark_ratio = np.mean(strip < 100)
+        # Text: lots of white background with scattered dark text pixels
+        # Typically >70% white with 0.5-20% dark (text characters)
+        # More aggressive detection to catch partial text lines
+        return white_ratio > 0.70 and 0.003 < dark_ratio < 0.25
+    
+    # Trim top edge
+    top_trim = 0
+    for i in range(0, min(h // 4, 150), strip_size):
+        strip = gray[i:i+strip_size, w//6:w*5//6]  # Check middle portion
+        if is_text_strip(strip):
+            top_trim = i + strip_size
+        else:
+            break
+    
+    # Trim bottom edge - scan from bottom upward, be more aggressive
+    bottom_trim = h
+    for i in range(h, max(h * 3 // 4, h - 150), -strip_size):
+        strip = gray[max(0,i-strip_size):i, w//6:w*5//6]
+        if is_text_strip(strip):
+            bottom_trim = i - strip_size
+        else:
+            break
+    
+    # Trim left edge
+    left_trim = 0
+    for i in range(0, min(w // 4, 100), strip_size):
+        strip = gray[h//6:h*5//6, i:i+strip_size]
+        if is_text_strip(strip):
+            left_trim = i + strip_size
+        else:
+            break
+    
+    # Trim right edge  
+    right_trim = w
+    for i in range(w, max(w * 3 // 4, w - 100), -strip_size):
+        strip = gray[h//6:h*5//6, max(0,i-strip_size):i]
+        if is_text_strip(strip):
+            right_trim = i - strip_size
+        else:
+            break
+    
+    # Only trim if we're not removing too much (safety: keep at least 60% of original)
+    if (right_trim - left_trim) < w * 0.5 or (bottom_trim - top_trim) < h * 0.5:
+        return img
+    
+    # Apply trim
+    if top_trim > 0 or bottom_trim < h or left_trim > 0 or right_trim < w:
+        logger.info(f"Trimming edges: top={top_trim}, bottom={h-bottom_trim}, left={left_trim}, right={w-right_trim}")
+        return img.crop((left_trim, top_trim, right_trim, bottom_trim))
+    
+    return img
 
 # ============ GE ID Generation ============
 def generate_ge_code(exam_year: int, paper_number: str) -> str:
@@ -578,6 +664,45 @@ async def upload_pdf(paper_id: str, file: UploadFile = File(...)):
     asyncio.create_task(process_pdf_extraction(paper_id, pdf_content, job.id))
     
     return {"message": "PDF uploaded successfully", "job_id": job.id, "paper_id": paper_id}
+
+@api_router.post("/papers/{paper_id}/re-extract")
+async def re_extract_paper(paper_id: str):
+    """Re-extract a paper with improved settings (deletes old questions/images first)"""
+    paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    
+    if not paper.get("pdf_path"):
+        raise HTTPException(status_code=400, detail="No PDF uploaded for this paper")
+    
+    # Download PDF from storage
+    try:
+        pdf_content, _ = get_object(paper["pdf_path"])
+    except Exception as e:
+        logger.error(f"Failed to download PDF: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve stored PDF")
+    
+    # Delete old questions and images for this paper
+    await db.questions.delete_many({"paper_id": paper_id})
+    await db.image_assets.update_many(
+        {"paper_id": paper_id},
+        {"$set": {"is_deleted": True}}
+    )
+    
+    # Update paper status
+    await db.papers.update_one(
+        {"id": paper_id},
+        {"$set": {"status": "processing", "total_questions": 0}}
+    )
+    
+    # Create new extraction job
+    job = ExtractionJob(paper_id=paper_id)
+    await db.extraction_jobs.insert_one(job.model_dump())
+    
+    # Start extraction
+    asyncio.create_task(process_pdf_extraction(paper_id, pdf_content, job.id))
+    
+    return {"message": "Re-extraction started", "job_id": job.id, "paper_id": paper_id}
 
 async def process_pdf_extraction(paper_id: str, pdf_content: bytes, job_id: str):
     """Background task to extract questions from PDF"""

@@ -1087,13 +1087,32 @@ const Dashboard = () => {
                   )}
                   <StatusTag status={selectedPaper.status} />
                 </div>
-                <button
-                  data-testid="back-to-papers-btn"
-                  onClick={() => { setSelectedPaper(null); setSelectedQuestion(null); setQuestions([]); }}
-                  className="text-xs px-2 py-1 border border-black hover:bg-black hover:text-white"
-                >
-                  All Papers
-                </button>
+                <div className="flex gap-2">
+                  {selectedPaper.status === "extracted" && (
+                    <button
+                      data-testid="re-extract-btn"
+                      onClick={async () => {
+                        try {
+                          const res = await axios.post(`${API}/papers/${selectedPaper.id}/re-extract`);
+                          toast.success("Re-extraction started with improved cropping!");
+                          setExtractionJobId(res.data.job_id);
+                        } catch (error) {
+                          toast.error("Failed: " + (error.response?.data?.detail || error.message));
+                        }
+                      }}
+                      className="text-xs px-2 py-1 border border-amber-600 text-amber-700 hover:bg-amber-50"
+                    >
+                      Re-Extract
+                    </button>
+                  )}
+                  <button
+                    data-testid="back-to-papers-btn"
+                    onClick={() => { setSelectedPaper(null); setSelectedQuestion(null); setQuestions([]); }}
+                    className="text-xs px-2 py-1 border border-black hover:bg-black hover:text-white"
+                  >
+                    All Papers
+                  </button>
+                </div>
               </div>
               
               {/* Upload zones - compact inline */}
