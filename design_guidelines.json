@@ -1,0 +1,77 @@
+{
+  "theme": "light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "vibe": "Architectural Drafting Table / Command Center",
+  "typography": {
+    "fonts": {
+      "heading": "IBM Plex Sans",
+      "body": "JetBrains Mono",
+      "instructions": "Main agent must install these fonts via Google Fonts. IBM Plex Sans for all structural headings, JetBrains Mono for body, data, extracted text, and coordinates. This enforces a technical 'document scanning' aesthetic."
+    },
+    "hierarchy": {
+      "h1": "text-4xl tracking-tight font-bold",
+      "h2": "text-2xl tracking-tight font-semibold",
+      "h3": "text-xl font-medium",
+      "body": "text-sm leading-relaxed",
+      "labels": "text-xs tracking-[0.2em] uppercase font-bold"
+    }
+  },
+  "color_palette": {
+    "background": "#FFFFFF",
+    "surface": "#F8FAFC",
+    "text_primary": "#0A0A0A",
+    "text_secondary": "#475569",
+    "border_hard": "#000000",
+    "border_soft": "#E2E8F0",
+    "accent_primary": "#002FA7",
+    "accent_secondary": "#FF3B30",
+    "accent_warning": "#F59E0B"
+  },
+  "layout_strategy": {
+    "grid": "Dual-Pane Command Center (Bento Mode B: Control Room)",
+    "description": "Left pane (40% width) for the raw PDF/extraction queue. Right pane (60% width) for the active form/verification grid of extracted data.",
+    "spacing": "Dense and compact. Use generous padding (p-6, p-8) inside major containers, but tight gaps (gap-0) between borders to create an exposed grid.",
+    "borders": "Grid Borders (The Technical Look). Use `border-collapse` style. Elements should share borders (e.g., `border-b border-r border-black`). Avoid rounded corners. Everything is sharp."
+  },
+  "component_rules": {
+    "general": "No shadows. No gradients. No rounded corners. Hard 1px solid black or dark grey borders for all containers.",
+    "shadcn_overrides": "In index.css, change `--radius: 0.5rem` to `--radius: 0rem`. Change `--border` to `0 0% 0%`. Change `--background` to `0 0% 100%` and `--foreground` to `0 0% 3.9%`.",
+    "pdf_upload": "Massive dropzone with `border-2 border-dashed border-black`. On hover, background turns `bg-[#F8FAFC]` and border becomes solid.",
+    "question_list": "Do not use standard separated cards. Use a continuous grid where each question is a row with a bottom border. Sub-parts (A, B, C) are indented blocks with left borders.",
+    "diagrams": "Wrap extracted images in sharp boxes with an overline label showing dimensions or 'Fig 1.1'. Image must not overflow.",
+    "status_tags": "Use monospace font, uppercase, 1px solid border, completely flat background."
+  },
+  "visual_enhancers": {
+    "icons": "Use Phosphor Icons (sharp/duotone) to match the technical Swiss aesthetic. Install via `yarn add @phosphor-icons/react`",
+    "animations": "Minimal. Hover states should invert colors (e.g., white background to black background, black text to white text) instantly. No soft fades.",
+    "testing": "All interactive elements (buttons, uploads, question rows, input fields) MUST include `data-testid` attributes formatted as `kebab-case` and role-based (e.g., `data-testid=\"pdf-upload-zone\"`, `data-testid=\"approve-question-btn\"`)."
+  },
+  "media": {
+    "image_urls": [
+      {
+        "category": "hero_background_abstract",
+        "url": "https://static.prod-images.emergentagent.com/jobs/70c60b1d-99b4-45f8-884f-f5d50e54080b/images/fdd29e00c5db0a5c35b2e5fd0b5dfdea0797b6a91f6b52386f8261c4067a538a.png",
+        "description": "Minimalist abstract geometric composition with fine grid lines. Use in empty states, login screens, or as a very low opacity (5%) background watermark."
+      },
+      {
+        "category": "empty_state_extraction",
+        "url": "https://static.prod-images.emergentagent.com/jobs/70c60b1d-99b4-45f8-884f-f5d50e54080b/images/9180546f95b29909f37266035a8e98b9541deaf6bf04e9d9bda6292ecd96afbc.png",
+        "description": "Close up of complex mathematical equations. Use as placeholder image for the PDF viewing pane before a document is uploaded."
+      },
+      {
+        "category": "user_avatar_placeholder",
+        "url": "https://images.unsplash.com/photo-1752738372136-2602aaafdcb7?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2NzZ8MHwxfHNlYXJjaHwxfHxlZHVjYXRpb24lMjBhZG1pbiUyMGRhc2hib2FyZCUyMHVzZXIlMjBwb3J0cmFpdHxlbnwwfHx8fDE3NzY0MjQyNTB8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Admin user portrait for the header profile indicator."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Install 'IBM Plex Sans' and 'JetBrains Mono' from Google Fonts and configure them in tailwind.config.js.",
+    "Install Phosphor Icons: `yarn add @phosphor-icons/react`.",
+    "Override the default shadcn css variables to enforce brutalist/sharp aesthetics (0px radius, black borders).",
+    "Build a dual-pane layout using CSS Grid. The left pane should be for uploading and viewing the PDF, the right pane for the data stream (extracted questions).",
+    "Do NOT use standard rounded cards with drop shadows. All boundaries should be established by 1px solid black lines.",
+    "Ensure `data-testid` is added to EVERY interactive element.",
+    "When displaying extracted diagrams, ensure the container handles aspect ratios safely without bleeding text. Use the provided images for empty states or backgrounds."
+  ]
+}
