@@ -315,7 +315,7 @@ def _init_gemini_client():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 def _parse_json_response(response_text: str) -> dict:
-    """Parse JSON from AI response, handling code blocks"""
+    """Parse JSON from AI response, handling code blocks and LaTeX escapes"""
     text = response_text.strip()
     if text.startswith("```json"):
         text = text[7:]
@@ -323,7 +323,36 @@ def _parse_json_response(response_text: str) -> dict:
         text = text[3:]
     if text.endswith("```"):
         text = text[:-3]
-    return json_lib.loads(text.strip())
+    text = text.strip()
+    
+    # First try direct parse
+    try:
+        return json_lib.loads(text)
+    except json_lib.JSONDecodeError:
+        pass
+    
+    # Fix LaTeX backslashes that break JSON: replace \( \) \[ \] \frac etc with escaped versions
+    # But preserve valid JSON escapes like \" \n \t \\
+    import re
+    # Replace single backslashes before LaTeX commands with double backslashes
+    fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+    try:
+        return json_lib.loads(fixed)
+    except json_lib.JSONDecodeError:
+        pass
+    
+    # Last resort: try to extract JSON object from response
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
+        try:
+            return json_lib.loads(match.group())
+        except json_lib.JSONDecodeError:
+            fixed2 = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', match.group())
+            try:
+                return json_lib.loads(fixed2)
+            except json_lib.JSONDecodeError as e:
+                logger.error(f"JSON parse failed even after fixes: {e}")
+                return {"questions": []}
 
 async def _call_gemini_vision(system_prompt: str, user_prompt: str, image_base64: str) -> str:
     """Call Gemini with an image and return text response"""
@@ -537,7 +566,12 @@ async def classify_and_structure_with_gemini(mmd_content: str, paper_id: str) ->
         
         prompt = f"""You are parsing a GCSE Maths exam paper. Below is the full content extracted by Mathpix OCR.
 
-YOUR JOB: Identify each exam question and return structured JSON. 
+YOUR JOB: Identify each exam question and return structured JSON.
+
+CRITICAL JSON RULES:
+- All backslashes in LaTeX MUST be double-escaped in JSON strings: use \\\\ not \\
+- Example: "latex": "\\\\( x^2 + 2x \\\\)" NOT "\\( x^2 \\)"
+- Example: "latex": "\\\\frac{{1}}{{2}}" NOT "\\frac{1}{2}" 
 
 RULES:
 - GCSE papers have 20-25 questions numbered 1 to ~25
