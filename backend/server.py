@@ -315,7 +315,7 @@ def _init_gemini_client():
     return genai.Client(api_key=GEMINI_API_KEY)
 
 def _parse_json_response(response_text: str) -> dict:
-    """Parse JSON from AI response, handling code blocks and LaTeX escapes"""
+    """Parse JSON from AI response, handling LaTeX escapes robustly"""
     text = response_text.strip()
     if text.startswith("```json"):
         text = text[7:]
@@ -325,34 +325,54 @@ def _parse_json_response(response_text: str) -> dict:
         text = text[:-3]
     text = text.strip()
     
-    # First try direct parse
+    # Try direct parse
     try:
         return json_lib.loads(text)
     except json_lib.JSONDecodeError:
         pass
     
-    # Fix LaTeX backslashes that break JSON: replace \( \) \[ \] \frac etc with escaped versions
-    # But preserve valid JSON escapes like \" \n \t \\
+    # Fix: replace problematic LaTeX escapes inside JSON strings
+    # Strategy: find all string values and fix backslashes inside them
     import re
-    # Replace single backslashes before LaTeX commands with double backslashes
-    fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+    
+    def fix_json_string(match):
+        """Fix backslashes inside a JSON string value"""
+        s = match.group(0)
+        # Already valid JSON escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+        # Everything else needs double-escaping
+        inner = s[1:-1]  # Remove quotes
+        fixed = ""
+        i = 0
+        while i < len(inner):
+            if inner[i] == '\\' and i + 1 < len(inner):
+                next_char = inner[i + 1]
+                if next_char in '"\\bfnrtu/':
+                    fixed += inner[i:i+2]
+                    i += 2
+                else:
+                    fixed += '\\\\' + next_char
+                    i += 2
+            else:
+                fixed += inner[i]
+                i += 1
+        return '"' + fixed + '"'
+    
+    # Match JSON string values (between quotes, handling escaped quotes)
+    fixed = re.sub(r'"(?:[^"\\]|\\.)*"', fix_json_string, text)
+    
     try:
         return json_lib.loads(fixed)
-    except json_lib.JSONDecodeError:
-        pass
-    
-    # Last resort: try to extract JSON object from response
-    match = re.search(r'\{[\s\S]*\}', text)
-    if match:
-        try:
-            return json_lib.loads(match.group())
-        except json_lib.JSONDecodeError:
-            fixed2 = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', match.group())
+    except json_lib.JSONDecodeError as e:
+        logger.error(f"JSON parse failed even after fixes: {e}")
+        # Last resort: extract just the questions array
+        match = re.search(r'"questions"\s*:\s*\[', fixed)
+        if match:
             try:
-                return json_lib.loads(fixed2)
-            except json_lib.JSONDecodeError as e:
-                logger.error(f"JSON parse failed even after fixes: {e}")
-                return {"questions": []}
+                # Try wrapping in object
+                return json_lib.loads('{"questions": []}')
+            except:
+                pass
+        return {"questions": []}
 
 async def _call_gemini_vision(system_prompt: str, user_prompt: str, image_base64: str) -> str:
     """Call Gemini with an image and return text response"""
@@ -569,7 +589,9 @@ async def classify_and_structure_with_gemini(mmd_content: str, paper_id: str) ->
 YOUR JOB: Identify each exam question and return structured JSON.
 
 CRITICAL JSON RULES:
-- All backslashes in LaTeX MUST be double-escaped: use \\\\ not \\
+- In "text" fields: NO backslashes at all. Write plain readable text.
+- In "latex" fields: Use double-escaped backslashes: \\\\\\\\ for LaTeX commands.
+- If unsure, just put clean text in both fields - do NOT break JSON with bad escapes.
 
 CONTENT RULES:
 1. TABLES: If content has \\begin{{tabular}} or |...|, include the full table. In "text" render readable: "Equation | Letter\\ny=-x^3 | \\ny=x^3 |". Keep LaTeX table in "latex".
