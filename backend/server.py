@@ -725,6 +725,34 @@ async def get_paper(paper_id: str):
         raise HTTPException(status_code=404, detail="Paper not found")
     return paper
 
+@api_router.delete("/papers/{paper_id}")
+async def delete_paper(paper_id: str):
+    """Delete a paper and all its questions, images, jobs"""
+    paper = await db.papers.find_one({"id": paper_id}, {"_id": 0})
+    if not paper:
+        raise HTTPException(status_code=404, detail="Paper not found")
+    
+    # Delete all related data
+    del_q = await db.questions.delete_many({"paper_id": paper_id})
+    del_img = await db.image_assets.delete_many({"paper_id": paper_id})
+    del_jobs = await db.extraction_jobs.delete_many({"paper_id": paper_id})
+    del_ms = await db.mark_schemes.delete_many({"paper_id": paper_id})
+    del_mse = await db.mark_scheme_entries.delete_many({"paper_id": paper_id})
+    del_logs = await db.api_call_logs.delete_many({"paper_id": paper_id})
+    await db.papers.delete_one({"id": paper_id})
+    
+    return {
+        "message": "Paper deleted",
+        "deleted": {
+            "questions": del_q.deleted_count,
+            "images": del_img.deleted_count,
+            "jobs": del_jobs.deleted_count,
+            "mark_schemes": del_ms.deleted_count,
+            "entries": del_mse.deleted_count,
+            "logs": del_logs.deleted_count
+        }
+    }
+
 # ============ Cost Monitoring Endpoint ============
 @api_router.get("/api-usage")
 async def get_api_usage(paper_id: Optional[str] = None):

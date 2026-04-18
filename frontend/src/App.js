@@ -1055,7 +1055,13 @@ const QuestionDetail = ({ question, onUpdate, allTopics }) => {
 };
 
 // ============ Papers List ============
-const PapersList = ({ papers, selectedId, onSelect }) => {
+const PapersList = ({ papers, selectedId, onSelect, onDelete }) => {
+  const formatDate = (isoStr) => {
+    if (!isoStr) return "";
+    const d = new Date(isoStr);
+    return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }) + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  };
+
   return (
     <div className="border-b border-black">
       <div className="p-3 border-b border-black">
@@ -1071,21 +1077,33 @@ const PapersList = ({ papers, selectedId, onSelect }) => {
             <div
               key={paper.id}
               data-testid={`paper-row-${paper.id}`}
-              onClick={() => onSelect(paper)}
-              className={`p-2 border-b border-slate-200 cursor-pointer flex items-center justify-between text-sm ${
+              className={`p-2 border-b border-slate-200 text-sm ${
                 selectedId === paper.id ? "bg-slate-100" : "hover:bg-slate-50"
               }`}
             >
-              <div>
-                <span className="font-semibold">{paper.board}</span>
-                <span className="text-slate-500 ml-1 text-xs">
-                  {paper.exam_year} P{paper.paper_number}
-                </span>
-                {paper.ge_code && (
-                  <span className="ml-2 text-xs font-mono px-1 border border-blue-800 bg-blue-50 text-blue-800">{paper.ge_code}</span>
-                )}
+              <div className="flex items-center justify-between cursor-pointer" onClick={() => onSelect(paper)}>
+                <div>
+                  <span className="font-semibold">{paper.board}</span>
+                  <span className="text-slate-500 ml-1 text-xs">
+                    {paper.exam_year} P{paper.paper_number}
+                  </span>
+                  {paper.ge_code && (
+                    <span className="ml-2 text-xs font-mono px-1 border border-blue-800 bg-blue-50 text-blue-800">{paper.ge_code}</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <StatusTag status={paper.status} />
+                  <button
+                    data-testid={`delete-paper-${paper.id}`}
+                    onClick={(e) => { e.stopPropagation(); onDelete(paper.id); }}
+                    className="p-1 text-red-500 hover:bg-red-50 border border-transparent hover:border-red-300"
+                    title="Delete paper"
+                  >
+                    <X size={12} weight="bold" />
+                  </button>
+                </div>
               </div>
-              <StatusTag status={paper.status} />
+              <div className="text-xs text-slate-400 mt-1">{formatDate(paper.created_at)}</div>
             </div>
           ))
         )}
@@ -1184,6 +1202,22 @@ const Dashboard = () => {
     setQuestions([]);
   };
 
+  const handleDeletePaper = async (paperId) => {
+    if (!window.confirm("Delete this paper and all its questions?")) return;
+    try {
+      await axios.delete(`${API}/papers/${paperId}`);
+      toast.success("Paper deleted");
+      if (selectedPaper?.id === paperId) {
+        setSelectedPaper(null);
+        setSelectedQuestion(null);
+        setQuestions([]);
+      }
+      fetchData();
+    } catch (error) {
+      toast.error("Failed to delete paper");
+    }
+  };
+
   const handleUploadComplete = (jobId) => {
     setExtractionJobId(jobId);
   };
@@ -1251,7 +1285,8 @@ const Dashboard = () => {
               <PapersList 
                 papers={papers} 
                 selectedId={selectedPaper?.id} 
-                onSelect={handlePaperSelect} 
+                onSelect={handlePaperSelect}
+                onDelete={handleDeletePaper}
               />
             </>
           ) : (
