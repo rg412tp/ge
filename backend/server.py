@@ -569,41 +569,37 @@ async def classify_and_structure_with_gemini(mmd_content: str, paper_id: str) ->
 YOUR JOB: Identify each exam question and return structured JSON.
 
 CRITICAL JSON RULES:
-- All backslashes in LaTeX MUST be double-escaped in JSON strings: use \\\\ not \\
-- Example: "latex": "\\\\( x^2 + 2x \\\\)" NOT "\\( x^2 \\)"
-- Example: "latex": "\\\\frac{{1}}{{2}}" NOT "\\frac{1}{2}" 
+- All backslashes in LaTeX MUST be double-escaped: use \\\\ not \\
 
-RULES:
-- GCSE papers have 20-25 questions numbered 1 to ~25
-- Numbers like "80" in text are NOT question numbers - they are data/values within questions
-- Page numbers, mark totals, "TOTAL FOR PAPER" are NOT questions
-- Questions have parts like (a), (b), (c)
-- If an image URL appears near a question, attach it to that question
-- Tables (markdown | pipes) belong to the question above them
-- "Blue cards", "Red cards" etc are CONTENT within a question, not separate questions
-- Extract marks from patterns like "(2 marks)", "(Total for question = 5 marks)"
+CONTENT RULES:
+1. TABLES: If content has \\begin{{tabular}} or |...|, include the full table. In "text" render readable: "Equation | Letter\\ny=-x^3 | \\ny=x^3 |". Keep LaTeX table in "latex".
+2. IMAGES: Any ![...](url) is a diagram. Put ALL URLs in "image_urls". Set "has_diagram":true. NEVER skip images. Filter out border/watermark/logo images.
+3. GEOMETRIC LABELS: "ADC" stays "ADC" not "A D C". Keep letter combos: ABC, PQR, ABCD.
+4. FULL TEXT: Include complete question context. "The diagram shows four triangles with angles 55, 45..." not just labels.
+5. PARTS: Each (a),(b),(c) is separate with COMPLETE text.
+6. MARKS: From "(2 marks)" or "(Total for question = 5 marks)".
 
-Return ONLY this JSON:
+GCSE papers have 20-25 questions. Data numbers are NOT question numbers.
+
+Return ONLY JSON:
 {{
   "questions": [
     {{
       "question_number": 1,
-      "text": "Complete clean question text including all context",
-      "latex": "Same text with LaTeX math preserved from Mathpix",
-      "parts": [
-        {{"part_label": "a", "text": "Part a text", "latex": "Part a with LaTeX", "marks": 2}}
-      ],
+      "text": "Complete readable text with tables formatted",
+      "latex": "With LaTeX double-escaped",
+      "parts": [{{"part_label":"a","text":"Full part","latex":"LaTeX","marks":2}}],
       "marks": 5,
       "has_diagram": true,
       "has_table": false,
-      "image_urls": ["https://...any image URLs from the content..."],
+      "image_urls": ["https://..."],
       "difficulty": "bronze|silver|gold",
-      "topics": ["topic1", "topic2"]
+      "topics": ["topic1"]
     }}
   ]
 }}
 
-Topics must be from: number-operations, fractions, ratio-proportion, percentages, indices, standard-form, surds, algebraic-expressions, linear-equations, quadratics, factorisation, simultaneous-equations, inequalities, sequences, functions, angles, triangles, circles, area-perimeter, volume-surface-area, trigonometry, pythagoras, transformations, vectors, coordinates, probability, data-handling, averages, cumulative-frequency, histograms
+Topics: number-operations, fractions, ratio-proportion, percentages, indices, standard-form, surds, algebraic-expressions, linear-equations, quadratics, factorisation, simultaneous-equations, inequalities, sequences, functions, angles, triangles, circles, area-perimeter, volume-surface-area, trigonometry, pythagoras, transformations, vectors, coordinates, probability, data-handling, averages, cumulative-frequency, histograms
 
 MATHPIX CONTENT:
 {content}"""

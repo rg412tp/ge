@@ -39,6 +39,16 @@ const renderLatex = (text, latex) => {
   if (!latex) return <span className="whitespace-pre-wrap">{text}</span>;
   
   try {
+    // Handle tables - render as HTML table
+    if (latex.includes('\\begin{tabular}') || latex.includes('\\hline')) {
+      try {
+        return <BlockMath math={latex} />;
+      } catch {
+        // Fallback: show clean text for tables
+        return <span className="whitespace-pre-wrap">{text}</span>;
+      }
+    }
+
     // Check if the content has explicit LaTeX delimiters \( \) or \[ \]
     const hasDelimiters = /\\\([\s\S]*?\\\)|\\\[[\s\S]*?\\\]/s.test(latex);
     
@@ -71,7 +81,7 @@ const renderLatex = (text, latex) => {
       }
     }
     
-    // If latex has long english words (5+ chars) without backslash, it's probably plain text being passed as latex
+    // If latex has long english words, show plain text
     const hasLongWords = /(?<!\\)[a-zA-Z]{5,}/.test(latex);
     if (hasLongWords) {
       return <span className="whitespace-pre-wrap">{text}</span>;
